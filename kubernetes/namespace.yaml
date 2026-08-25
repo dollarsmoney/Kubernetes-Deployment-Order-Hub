@@ -1,0 +1,50 @@
+# =============================================================================
+# namespace.yaml
+# =============================================================================
+# A Namespace is a logical partition of the cluster. It gives you:
+#
+#   - a scope for names. Two namespaces can each have a "backend-service".
+#   - a target for RBAC, quotas, and NetworkPolicies.
+#   - the middle segment of internal DNS names:
+#         backend-service.jollof-run.svc.cluster.local
+#         <service>.<NAMESPACE>.svc.cluster.local
+#   - a single command that deletes everything in it.
+#
+# What it is NOT: a security boundary on its own. Without NetworkPolicies, pods
+# in ANY namespace can reach pods in any other. Namespaces organise; they do not
+# isolate.
+#
+# The name here MUST match the `sub` condition in the backend IRSA trust policy
+# (terraform/iam.tf):
+#     system:serviceaccount:jollof-run:backend-sa
+#                           ^^^^^^^^^^
+# Rename this namespace and IRSA silently stops working.
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jollof-run
+  labels:
+    name: jollof-run
+    app.kubernetes.io/part-of: jollof-run
+
+    # -------------------------------------------------------------------------
+    # POD SECURITY ADMISSION
+    # -------------------------------------------------------------------------
+    # Built into Kubernetes since 1.25 — no admission controller to install.
+    # "restricted" is the strictest of the three built-in profiles: it forbids
+    # privileged containers, host namespaces, host paths, and privilege
+    # escalation, and requires a non-root user and a seccomp profile.
+    #
+    # Both our images already satisfy it (see the securityContext blocks in the
+    # Deployments), so enforcing costs nothing and stops a careless future
+    # deployment from running as root.
+    #
+    # enforce = reject non-compliant pods
+    # audit   = record them in the audit log
+    # warn    = print a warning to whoever ran kubectl
+    # -------------------------------------------------------------------------
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

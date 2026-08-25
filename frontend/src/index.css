@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    /*
+     * SMOOTH SCROLLING.
+     * Native, one line, no JavaScript. Every anchor link and every
+     * scrollIntoView() call in the app inherits it.
+     */
+    scroll-behavior: smooth;
+
+    /* Stop the sticky navbar covering a section you just jumped to. */
+    scroll-padding-top: 5.5rem;
+  }
+
+  body {
+    @apply bg-white font-sans text-ink-800 antialiased;
+    /* Prevent a horizontal scrollbar from decorative off-canvas elements. */
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-display tracking-tight text-ink-900;
+  }
+
+  /* Visible focus ring for keyboard users, invisible for mouse users.
+     :focus-visible does this automatically — never `outline: none`. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2;
+  }
+}
+
+@layer components {
+  /* --------------------------------------------------------------------- */
+  /* Reusable building blocks. Anything used more than twice lives here     */
+  /* rather than being copy-pasted as a long className.                     */
+  /* --------------------------------------------------------------------- */
+
+  .container-x {
+    @apply mx-auto w-full max-w-7xl px-5 sm:px-8 lg:px-12;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-full
+           font-display font-semibold transition-all duration-200
+           active:scale-[0.97];
+  }
+
+  .btn-primary {
+    @apply btn bg-brand-600 text-white shadow-brand
+           hover:bg-brand-700 hover:shadow-lg;
+  }
+
+  .btn-ghost {
+    @apply btn bg-white text-ink-900 ring-1 ring-ink-200
+           hover:bg-ink-50 hover:ring-ink-300;
+  }
+
+  .btn-lg { @apply px-7 py-3.5 text-base; }
+  .btn-md { @apply px-5 py-2.5 text-sm; }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-3 py-1
+           text-xs font-semibold;
+  }
+
+  .section-title {
+    @apply font-display text-3xl font-extrabold text-ink-900
+           sm:text-4xl lg:text-[2.75rem] lg:leading-[1.1];
+  }
+
+  .section-sub {
+    @apply mt-3 max-w-2xl text-base leading-relaxed text-ink-500 sm:text-lg;
+  }
+
+  /* Horizontal snap-scroll rails, used by Categories and the food shelves.
+     scrollbar-hide is defined in the utilities layer below. */
+  .rail {
+    @apply flex snap-x snap-mandatory gap-4 overflow-x-auto pb-4
+           scrollbar-hide;
+  }
+
+  .rail-item { @apply snap-start shrink-0; }
+
+  /* Skeleton placeholder shown while the API responds. */
+  .skeleton {
+    @apply relative overflow-hidden bg-ink-100;
+  }
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0 -translate-x-full animate-shimmer
+           bg-gradient-to-r from-transparent via-white/70 to-transparent;
+  }
+}
+
+@layer utilities {
+  /* Hide the scrollbar but keep the element scrollable. Needed for the
+     horizontal rails — a visible scrollbar under a card row looks unfinished
+     on desktop, and mobile browsers hide it anyway. */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Fade the right edge of a rail, hinting that there is more to scroll. */
+  .fade-right {
+    mask-image: linear-gradient(to right, black 88%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, black 88%, transparent 100%);
+  }
+
+  .text-balance { text-wrap: balance; }
+}
+
+/* --------------------------------------------------------------------- */
+/* ACCESSIBILITY                                                          */
+/* --------------------------------------------------------------------- */
+/* Respect the OS "reduce motion" setting. Vestibular disorders make large
+   parallax and slide animations genuinely unpleasant, and this is one line.
+   Framer Motion reads the same preference via useReducedMotion(). */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

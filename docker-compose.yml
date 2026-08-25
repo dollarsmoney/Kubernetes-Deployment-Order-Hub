@@ -1,0 +1,129 @@
+# =============================================================================
+# docker-compose.yml — LOCAL DEVELOPMENT ONLY
+# =============================================================================
+# This file is NEVER deployed. It exists so you can run the whole application
+# on your laptop, before EKS or RDS exist, and prove the containers work.
+#
+#   docker compose up --build
+#   ->  http://localhost:8080   the site
+#   ->  http://localhost:8000/docs  FastAPI's auto-generated API docs
+#
+# The topology mirrors production deliberately:
+#
+#     browser -> frontend (nginx :8080) -> backend-service :8000 -> postgres
+#                        ^ proxies /api                  ^ same service NAME
+#                                                          as in Kubernetes,
+#                                                          so ONE nginx.conf
+#                                                          works in both.
+#
+# THE ONE REAL DIFFERENCE: credentials.
+#   Here      -> DATABASE_URL, a plain environment variable
+#   In EKS    -> Secrets Store CSI Driver + IRSA + Secrets Manager
+# That difference is the entire subject of Phase 8.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — a throwaway stand-in for RDS
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: jollof-postgres
+
+    environment:
+      POSTGRES_USER: jollofadmin
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB: jollofrun
+
+    # -------------------------------------------------------------------------
+    # YES, THERE IS A PASSWORD IN THIS FILE. That is fine, and here is why:
+    #
+    #   - it guards a container that exists only on your laptop
+    #   - the container is deleted by `docker compose down -v`
+    #   - the port is bound to 127.0.0.1 only (see below), so nothing outside
+    #     this machine can reach it
+    #   - it is not the production password, and never will be
+    #
+    # Security is about protecting things that need protecting. Treating
+    # "localdev" as a secret would be theatre, and it would obscure the real
+    # lesson: the PRODUCTION password lives in Secrets Manager and appears in
+    # no file anywhere.
+    # -------------------------------------------------------------------------
+
+    ports:
+      # 127.0.0.1 prefix binds to LOOPBACK ONLY. Without it, Docker publishes
+      # on 0.0.0.0 and your database is reachable by anyone on the coffee-shop
+      # wifi you are sitting on.
+      - '127.0.0.1:5432:5432'
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      # pg_isready returns 0 only once Postgres is accepting connections.
+      # The backend's depends_on waits on THIS, which is what prevents the
+      # "database is starting up" crash loop on a cold start.
+      test: ['CMD-SHELL', 'pg_isready -U jollofadmin -d jollofrun']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Backend
+  # ---------------------------------------------------------------------------
+  # NAMED "backend-service", not "backend".
+  #
+  # Compose creates a DNS entry for each service name on its network, exactly
+  # as Kubernetes does. Matching the Kubernetes Service name means
+  # frontend/nginx.conf can say `proxy_pass http://backend-service:8000/`
+  # unchanged in both environments — no templating, no env substitution, no
+  # entrypoint script rewriting config at container start.
+  # ---------------------------------------------------------------------------
+  backend-service:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jollof-backend
+
+    environment:
+      # The LOCAL credential path. In EKS this variable does not exist and
+      # db.py reads the CSI-mounted secret file instead — see the resolution
+      # order in backend/db.py.
+      DATABASE_URL: postgresql+psycopg2://jollofadmin:localdev@postgres:5432/jollofrun
+      LOG_LEVEL: INFO
+      CORS_ORIGINS: http://localhost:8080,http://localhost:5173
+
+    ports:
+      # Exposed so you can hit http://localhost:8000/docs directly while
+      # developing. NOTE: in Kubernetes the backend is NOT published at all —
+      # there is no Ingress rule and the Service is ClusterIP.
+      - '127.0.0.1:8000:8000'
+
+    depends_on:
+      postgres:
+        condition: service_healthy # wait for the healthcheck, not just "started"
+
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: jollof-frontend
+
+    ports:
+      # 8080 because nginx-unprivileged listens on 8080 as a non-root user.
+      - '8080:8080'
+
+    depends_on:
+      - backend-service
+
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local

@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------
+# Terraform
+# ---------------------------------------------------------------
+# State files contain EVERY value Terraform manages -- including the
+# generated RDS password. Never commit them. See docs/architecture.md
+# "Where the password actually lives".
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+crash.log
+crash.*.log
+
+# Variable files may hold account-specific or sensitive values
+*.tfvars
+*.tfvars.json
+!example.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored. It pins exact
+# provider versions and their checksums, and committing it is what makes a
+# `terraform init` reproducible for the next person (and for CI).
+
+# Terraform plan output (a plan file is as sensitive as state)
+*.tfplan
+tfplan
+plan.out
+
+# ---------------------------------------------------------------
+# Secrets / credentials -- belt and braces
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials
+kubeconfig
+*-kubeconfig.yaml
+
+# ---------------------------------------------------------------
+# Node / frontend
+# ---------------------------------------------------------------
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------
+# Python / backend
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ---------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

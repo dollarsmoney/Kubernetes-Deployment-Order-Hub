@@ -1,0 +1,189 @@
+# =============================================================================
+# frontend-deployment.yaml
+# =============================================================================
+# nginx serving the built React SPA, and reverse-proxying /api/* to
+# backend-service (see frontend/nginx.conf).
+#
+# Contrast this with backend-deployment.yaml — the differences ARE the lesson:
+#
+#   backend                              frontend
+#   -----------------------------------  -----------------------------------
+#   serviceAccountName: backend-sa       (none — uses `default`)
+#   IRSA role with AWS permissions       NO AWS identity at all
+#   CSI volume mounting a secret         no secrets of any kind
+#   readiness probe hits the database    readiness probe hits a static file
+#   ClusterIP, no Ingress rule           the Ingress target, internet-facing
+#
+# The component that needs AWS access has exactly the AWS access it needs. The
+# component that does not need any has none. That is least privilege as an
+# architecture, not as a checkbox.
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: jollof-run
+  labels:
+    app: frontend
+    app.kubernetes.io/name: frontend
+    app.kubernetes.io/part-of: jollof-run
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: frontend
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0 # never drop below 2 ready pods
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app: frontend
+        app.kubernetes.io/name: frontend
+    spec:
+      # No serviceAccountName -> the namespace `default` SA, which carries no
+      # IRSA annotation and therefore no AWS identity whatsoever.
+      automountServiceAccountToken: false
+
+      securityContext:
+        runAsNonRoot: true
+        # 101 is the nginx user in the nginx-unprivileged image. It must match
+        # the image's own USER, or nginx cannot read the files it needs to
+        # serve and every request returns 403.
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: frontend
+
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: frontend
+          image: 609898225411.dkr.ecr.us-east-1.amazonaws.com/jollof-run/frontend:latest
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 8080 # nginx-unprivileged listens here, not 80
+              protocol: TCP
+
+          # No environment variables at all.
+          #
+          # A static SPA cannot read env vars at runtime — it is just files
+          # served to a browser. Projects that need a configurable API host end
+          # up with an entrypoint script that rewrites JavaScript at container
+          # start, which is fragile and surprising.
+          #
+          # We avoid the entire category of problem: the app fetches the
+          # relative path '/api/...' and nginx decides where that goes. See
+          # frontend/src/lib/api.js.
+
+          resources:
+            requests:
+              cpu: 50m # nginx serving static files is extremely cheap
+              memory: 64Mi
+            limits:
+              cpu: 300m
+              memory: 128Mi
+
+          # -------------------------------------------------------------------
+          # PROBES
+          # -------------------------------------------------------------------
+          # Both hit /healthz, which nginx answers from its own config without
+          # touching the backend.
+          #
+          # THAT IS DELIBERATE. If the frontend reported unhealthy whenever the
+          # API was down, the ALB would pull every frontend target out of
+          # service and the site would go from "degraded, showing cached data"
+          # to "completely unreachable". A frontend serving static files is
+          # healthy regardless of the backend's state.
+          # -------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 3
+            failureThreshold: 10 # 30s budget; nginx starts in under a second
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # -------------------------------------------------------------------
+          # GRACEFUL SHUTDOWN
+          # -------------------------------------------------------------------
+          # A subtle race worth understanding:
+          #
+          # When a pod is deleted, two things happen IN PARALLEL, not in order:
+          #   1. kubelet sends SIGTERM to the container
+          #   2. the endpoints controller removes the pod from the Service, and
+          #      that removal propagates to kube-proxy and to the ALB target
+          #      group
+          #
+          # Step 2 takes a few seconds. If nginx dies instantly on SIGTERM, the
+          # ALB keeps sending it requests for those few seconds and users see
+          # 502s during every deploy.
+          #
+          # This preStop hook sleeps 5 seconds BEFORE SIGTERM is delivered,
+          # giving deregistration time to complete. The pod keeps serving
+          # normally throughout.
+          #
+          # This is the single most common cause of "we get errors during every
+          # rolling update" and almost nobody adds it until they have been
+          # bitten.
+          # -------------------------------------------------------------------
+          lifecycle:
+            preStop:
+              exec:
+                command: ['/bin/sh', '-c', 'sleep 5']
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ['ALL']
+
+          # nginx needs writable scratch space, and the root filesystem is
+          # read-only. These are the exact paths nginx-unprivileged uses.
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /tmp
+
+      volumes:
+        - name: nginx-cache
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+        - name: nginx-run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

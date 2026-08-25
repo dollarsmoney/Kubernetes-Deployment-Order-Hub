@@ -1,0 +1,111 @@
+# =============================================================================
+# backend-service.yaml
+# =============================================================================
+#
+# THE PROBLEM A SERVICE SOLVES:
+#
+#   Pods are mortal and their IPs are not stable. Delete a pod, the ReplicaSet
+#   creates a new one with a DIFFERENT IP. A rolling update replaces every IP.
+#   Nothing can hardcode a pod IP and keep working.
+#
+# THE SOLUTION:
+#
+#   A Service is a stable virtual IP (the ClusterIP) plus a DNS name, in front
+#   of a set of pods selected BY LABEL.
+#
+#      nginx  ->  backend-service.jollof-run.svc.cluster.local
+#                        |  CoreDNS resolves to the ClusterIP, e.g. 172.20.x.x
+#                        v
+#                 kube-proxy's iptables/IPVS rules
+#                        |  DNAT to one of the current healthy pod IPs
+#                        v
+#                 10.0.34.17:8000   or   10.0.51.203:8000
+#
+#   The ClusterIP never changes for the life of the Service. Pods behind it
+#   come and go freely.
+#
+# SERVICE DISCOVERY — the DNS name is assembled mechanically:
+#
+#     backend-service . jollof-run . svc . cluster.local
+#     <service name>    <namespace>  <type>  <cluster domain>
+#
+#   Every pod's /etc/resolv.conf has a search path, so from a pod in the SAME
+#   namespace all of these resolve identically:
+#       backend-service
+#       backend-service.jollof-run
+#       backend-service.jollof-run.svc
+#       backend-service.jollof-run.svc.cluster.local
+#
+#   Verify it yourself in Phase 5:
+#       kubectl run -it --rm dnstest --image=busybox:1.36 --restart=Never \
+#         -n jollof-run -- nslookup backend-service
+#
+# THE SERVICE TYPES:
+#
+#   ClusterIP     internal only. No external access whatsoever.   <-- THIS ONE
+#   NodePort      opens the same high port on EVERY node. Crude.
+#   LoadBalancer  provisions a cloud load balancer per service. Expensive:
+#                 one ALB/NLB each, so ten services means ten load balancers.
+#   ExternalName  a CNAME to something outside the cluster.
+#
+# WHY ClusterIP HERE — this is the point of the whole design:
+#
+#   There is NO Ingress rule pointing at this Service. The only thing that ever
+#   talks to it is nginx inside the frontend pod. It has no external DNS name,
+#   no public IP, and no path through the ALB.
+#
+#   Phase 12's Test 4 depends on exactly this: the backend and the database are
+#   both unreachable from the internet.
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service # <- the hostname in frontend/nginx.conf
+  namespace: jollof-run
+  labels:
+    app: backend
+    app.kubernetes.io/part-of: jollof-run
+spec:
+  type: ClusterIP
+
+  # ---------------------------------------------------------------------------
+  # THE SELECTOR
+  # ---------------------------------------------------------------------------
+  # Matches .spec.template.metadata.labels in backend-deployment.yaml.
+  #
+  # Note it does NOT reference the Deployment by name. The Service has no idea
+  # Deployments exist — it selects PODS by label. A pod created by any means
+  # with app: backend joins this Service automatically.
+  #
+  # THE #1 CAUSE of "my Service returns 503": this selector does not match the
+  # pod labels. Diagnose with:
+  #     kubectl get endpoints backend-service -n jollof-run
+  # An empty ENDPOINTS column means the selector matches nothing.
+  # ---------------------------------------------------------------------------
+  selector:
+    app: backend
+
+  ports:
+    - name: http
+      protocol: TCP
+
+      # port       the port the SERVICE listens on (what callers connect to)
+      # targetPort the port on the POD to forward to
+      #
+      # Both 8000 here, so it looks redundant — but they are genuinely
+      # independent. The frontend Service uses 80 -> 8080 precisely because
+      # nginx-unprivileged cannot bind 80.
+      port: 8000
+      targetPort: http # by NAME, referencing `name: http` in the container's
+                       # ports. More robust than a number: change the container
+                       # port and this follows automatically.
+
+  # ---------------------------------------------------------------------------
+  # Keep a client pinned to the same pod for 3 hours based on its source IP.
+  # DELIBERATELY LEFT OFF — our API is stateless, so spreading requests evenly
+  # is strictly better. Only enable this if you have in-memory session state,
+  # and if you do, prefer fixing that instead.
+  #
+  #   sessionAffinity: ClientIP
+  # ---------------------------------------------------------------------------

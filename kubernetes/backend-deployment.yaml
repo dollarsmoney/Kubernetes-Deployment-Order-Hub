@@ -1,0 +1,296 @@
+# =============================================================================
+# backend-deployment.yaml
+# =============================================================================
+#
+# THE CONTROLLER HIERARCHY — say this out loud until it is automatic:
+#
+#   Deployment          "I want 2 healthy replicas of this pod spec"
+#       |  creates and owns
+#       v
+#   ReplicaSet          "keep exactly 2 pods matching this selector alive"
+#       |  creates and owns
+#       v
+#   Pod  Pod            the actual running containers
+#
+# You write Deployments. Deployments write ReplicaSets. ReplicaSets write Pods.
+# You should essentially never create a Pod or a ReplicaSet by hand.
+#
+# SELF-HEALING (Phase 5 / Test 6): delete a pod and the ReplicaSet's controller
+# notices the count is 1 instead of 2 within milliseconds and creates a
+# replacement. Nothing "restarts" the pod — Kubernetes creates a NEW one, with a
+# new name and a new IP. Pods are cattle.
+#
+# ROLLING UPDATES: change the image tag and the Deployment creates a SECOND
+# ReplicaSet, scales it up while scaling the old one down according to the
+# strategy below, and keeps the old ReplicaSet at 0 replicas so
+# `kubectl rollout undo` can scale it straight back up.
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: jollof-run
+  labels:
+    app: backend
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/part-of: jollof-run
+spec:
+  replicas: 2
+
+  # ---------------------------------------------------------------------------
+  # THE SELECTOR IS THE LINK between this Deployment and its pods.
+  #
+  # It must match .spec.template.metadata.labels. If it does not, the API server
+  # rejects the object. It is also IMMUTABLE after creation — changing it means
+  # deleting and recreating the Deployment.
+  #
+  # The same labels are what backend-service.yaml matches on to find its
+  # endpoints. Labels are the universal join key in Kubernetes.
+  # ---------------------------------------------------------------------------
+  selector:
+    matchLabels:
+      app: backend
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # With replicas: 2 —
+      #   maxUnavailable: 0  never drop below 2 ready pods. ZERO downtime.
+      #   maxSurge: 1        allow a 3rd pod temporarily during the rollout.
+      #
+      # Order of operations: start the new pod -> wait for it to pass its
+      # readiness probe -> only then terminate an old one.
+      #
+      # maxUnavailable: 1 would be cheaper (no 3rd pod) but would run on a
+      # single replica mid-rollout. On a 2-replica service, choose availability.
+      maxUnavailable: 0
+      maxSurge: 1
+
+  template:
+    metadata:
+      labels:
+        app: backend
+        app.kubernetes.io/name: backend
+    spec:
+      # -----------------------------------------------------------------------
+      # THE IRSA LINK. Without this line the pod runs as the `default`
+      # ServiceAccount, gets no AWS identity, the CSI mount fails, and the pod
+      # never starts.
+      # -----------------------------------------------------------------------
+      serviceAccountName: backend-sa
+
+      # Do not mount the DEFAULT Kubernetes API token. This pod never calls the
+      # Kubernetes API — only the AWS API, via the projected IRSA token, which
+      # is injected separately by the EKS webhook. One less credential in the
+      # container.
+      automountServiceAccountToken: false
+
+      # -----------------------------------------------------------------------
+      # POD-LEVEL SECURITY CONTEXT
+      # -----------------------------------------------------------------------
+      # Required by the `restricted` Pod Security Standard enforced on the
+      # namespace. Also just correct.
+      # -----------------------------------------------------------------------
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000 # matches the appuser created in backend/Dockerfile
+        runAsGroup: 1000
+        fsGroup: 1000 # group ownership of mounted volumes, incl. the secret
+        seccompProfile:
+          type: RuntimeDefault # block unusual syscalls
+
+      # -----------------------------------------------------------------------
+      # SPREAD PODS ACROSS NODES
+      # -----------------------------------------------------------------------
+      # Without this the scheduler may put both replicas on the same node, and
+      # losing that node takes the whole service down — the replicas bought you
+      # nothing.
+      #
+      # ScheduleAnyway (not DoNotSchedule) means "prefer spreading, but run
+      # anyway if you cannot". On a 2-node cluster DoNotSchedule would block
+      # rollouts whenever a node is briefly unavailable.
+      # -----------------------------------------------------------------------
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: backend
+
+      # How long to allow for graceful shutdown before SIGKILL. uvicorn stops
+      # accepting new connections on SIGTERM and drains in-flight requests.
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: backend
+
+          # -------------------------------------------------------------------
+          # IMAGE
+          # -------------------------------------------------------------------
+          # :latest is used here because this is a learning project and you
+          # will rebuild constantly.
+          #
+          # IN PRODUCTION, NEVER :latest. Use an immutable tag — a git SHA, or
+          # better a digest (image@sha256:...). With :latest you cannot tell
+          # which build is running, `kubectl rollout undo` has nothing
+          # meaningful to roll back to, and two pods created minutes apart can
+          # be running different code.
+          # -------------------------------------------------------------------
+          image: 609898225411.dkr.ecr.us-east-1.amazonaws.com/jollof-run/backend:latest
+
+          # Always re-pull. Necessary with a mutable :latest tag, otherwise a
+          # node that already has an image called :latest keeps using the old
+          # bytes. With immutable tags, IfNotPresent is correct and faster.
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          # -------------------------------------------------------------------
+          # ENVIRONMENT — note what is NOT here
+          # -------------------------------------------------------------------
+          # No DATABASE_URL. No password. No username. No RDS endpoint. No AWS
+          # access key. No region, no role ARN.
+          #
+          # Everything the app needs to reach the database arrives through the
+          # CSI-mounted file below. The only variables here are non-secret
+          # operational settings.
+          # -------------------------------------------------------------------
+          env:
+            - name: LOG_LEVEL
+              value: 'INFO'
+
+            # The path db.py reads. Matches the volumeMount below and the
+            # objectAlias in secretproviderclass.yaml. Kept as a variable so
+            # all three stay visibly connected.
+            - name: DB_SECRET_FILE
+              value: /mnt/secrets-store/db-credentials
+
+            # Handy for identifying which pod answered a request.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+          volumeMounts:
+            - name: db-secret
+              mountPath: /mnt/secrets-store
+              readOnly: true
+
+            # The `restricted` profile wants a read-only root filesystem
+            # (below), so anything that needs to write needs an explicit
+            # writable volume. Python writes almost nothing, but /tmp must
+            # exist and be writable.
+            - name: tmp
+              mountPath: /tmp
+
+          # -------------------------------------------------------------------
+          # RESOURCES
+          # -------------------------------------------------------------------
+          # requests  what the SCHEDULER reserves. A node needs this much free
+          #           capacity or the pod stays Pending.
+          # limits    the hard ceiling. Exceed the memory limit and the kernel
+          #           OOMKills the container (exit 137). Exceed the CPU limit
+          #           and you are merely throttled — CPU is compressible,
+          #           memory is not.
+          #
+          # ALWAYS SET THESE. A pod with no requests can be scheduled onto an
+          # already-full node; a pod with no limits can consume the whole node
+          # and starve everything else on it.
+          #
+          # Sized for t3.small (2 vCPU, 2 GiB) with 2 pods per node.
+          # -------------------------------------------------------------------
+          resources:
+            requests:
+              cpu: 100m # 0.1 of a core
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+
+          # -------------------------------------------------------------------
+          # PROBES — three of them, each answering a different question
+          # -------------------------------------------------------------------
+
+          # STARTUP: "has it finished booting?"
+          # While this is running, the liveness and readiness probes are
+          # suspended. This is what lets a slow start (waiting for RDS, running
+          # the seed) take up to 5 minutes without the liveness probe killing
+          # the container halfway through.
+          #   failureThreshold x periodSeconds = 30 x 10s = 300s budget
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+            timeoutSeconds: 3
+
+          # LIVENESS: "is it wedged? should I restart it?"
+          # Hits /health, which touches NOTHING external.
+          #
+          # THE CLASSIC MISTAKE is pointing this at /health/ready. Then a brief
+          # RDS blip fails the liveness probe on every replica simultaneously,
+          # Kubernetes restarts all of them, and a 30-second database hiccup
+          # becomes a full outage plus a thundering herd of reconnects.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # READINESS: "can it serve traffic RIGHT NOW?"
+          # Hits /health/ready, which DOES check the database.
+          # On failure the pod is removed from the Service's endpoints but is
+          # NOT restarted — traffic stops arriving, the pod keeps trying to
+          # recover, and it rejoins automatically when it can.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+
+          # -------------------------------------------------------------------
+          # CONTAINER SECURITY CONTEXT
+          # -------------------------------------------------------------------
+          securityContext:
+            allowPrivilegeEscalation: false # block setuid escalation
+            readOnlyRootFilesystem: true # the image's filesystem is immutable
+            capabilities:
+              drop: ['ALL'] # drop every Linux capability
+
+      volumes:
+        # ---------------------------------------------------------------------
+        # THE CSI SECRET VOLUME
+        # ---------------------------------------------------------------------
+        # This is where Secrets Manager meets the pod.
+        #
+        # `driver: secrets-store.csi.k8s.io` tells kubelet to hand the mount to
+        # the Secrets Store CSI Driver rather than handling it itself. The
+        # driver looks up the SecretProviderClass named below, passes its
+        # objects[] to the AWS provider, and the provider authenticates as this
+        # pod via IRSA.
+        #
+        # readOnly: true is REQUIRED. The driver rejects a read-write mount.
+        # ---------------------------------------------------------------------
+        - name: db-secret
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: jollof-db-credentials
+
+        # In-memory scratch space, since the root filesystem is read-only.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi

@@ -1,0 +1,82 @@
+# =============================================================================
+# frontend-service.yaml
+# =============================================================================
+# Also a ClusterIP — which surprises people, because this is the service the
+# public reaches.
+#
+# WHY NOT type: LoadBalancer?
+#
+#   Because the ALB is created by the INGRESS, not by this Service. Making this
+#   a LoadBalancer Service would provision a SECOND load balancer (an NLB),
+#   costing another ~$16/month and bypassing the Ingress, the WAF, and all the
+#   path routing.
+#
+# HOW TRAFFIC ACTUALLY ARRIVES, with target-type: ip on the Ingress:
+#
+#   Internet -> WAF -> ALB -> pod IP:8080 directly
+#
+#   The ALB registers POD IPs in its target group and sends traffic straight to
+#   them, bypassing the ClusterIP entirely. So what is this Service even for?
+#
+#   Three things:
+#     1. The Ingress refers to a Service by name — that is the API contract.
+#     2. The ALB controller reads THIS Service to discover the target port and
+#        to watch the pod set via its selector.
+#     3. In-cluster callers can still reach the frontend by name.
+#
+#   With target-type: instance (the other option) traffic WOULD flow through a
+#   NodePort and the ClusterIP. We use ip because it removes a hop, preserves
+#   the real client IP, and works with pods on Fargate.
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: jollof-run
+  labels:
+    app: frontend
+    app.kubernetes.io/part-of: jollof-run
+  annotations:
+    # -------------------------------------------------------------------------
+    # ALB TARGET GROUP HEALTH CHECK
+    # -------------------------------------------------------------------------
+    # These configure the health check on the TARGET GROUP the controller
+    # creates, and they are SEPARATE from the Kubernetes readiness probe:
+    #
+    #   readinessProbe   kubelet asks "should this pod be in the Service?"
+    #   ALB health check the LOAD BALANCER asks "should I send this target
+    #                    traffic?"
+    #
+    # Both must pass for a request to arrive. A pod can be Ready in Kubernetes
+    # and still show as unhealthy in the ALB console if these annotations point
+    # at a path nginx does not serve — a genuinely confusing failure mode, and
+    # the first thing to check when `kubectl get pods` looks perfect but the
+    # ALB returns 503.
+    # -------------------------------------------------------------------------
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
+    alb.ingress.kubernetes.io/success-codes: '200'
+spec:
+  type: ClusterIP
+
+  selector:
+    app: frontend
+
+  ports:
+    - name: http
+      protocol: TCP
+
+      # HERE the two ports genuinely differ:
+      #   port 80         what callers (and the Ingress) address
+      #   targetPort 8080 where nginx-unprivileged actually listens, because a
+      #                   non-root process cannot bind a port below 1024
+      #
+      # The Service handles the translation, so nothing upstream needs to know
+      # or care that the container is not on 80.
+      port: 80
+      targetPort: http

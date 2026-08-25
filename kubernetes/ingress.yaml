@@ -1,0 +1,189 @@
+# =============================================================================
+# ingress.yaml — where Kubernetes and AWS meet
+# =============================================================================
+#
+# WHAT AN INGRESS IS: a YAML object describing HTTP routing rules. That is all.
+# It is inert data. Apply this to a cluster with no ingress controller and
+# absolutely nothing happens — no error, no load balancer, no traffic. The
+# object simply sits there.
+#
+# WHAT MAKES IT REAL: the AWS Load Balancer Controller, a Deployment running in
+# kube-system, WATCHES the Kubernetes API for Ingress objects and translates
+# them into AWS API calls.
+#
+# THE FULL SEQUENCE when you `kubectl apply -f ingress.yaml`:
+#
+#   1. kubectl sends the object to the API server, which stores it in etcd.
+#   2. The ALB controller's watch fires.
+#   3. It reads the annotations below and calls, in order:
+#        elasticloadbalancing:CreateLoadBalancer
+#        elasticloadbalancing:CreateTargetGroup
+#        elasticloadbalancing:CreateListener
+#        elasticloadbalancing:CreateRule
+#        ec2:CreateSecurityGroup + AuthorizeSecurityGroupIngress
+#        wafv2:AssociateWebACL          <- because of the wafv2-acl-arn below
+#      It is allowed to do all this because of its IRSA role (terraform/iam.tf).
+#   4. It DISCOVERS which subnets to use by scanning for the tag
+#        kubernetes.io/role/elb = 1
+#      which vpc.tf put on the public subnets. This is why that tag is
+#      load-bearing.
+#   5. It registers pod IPs in the target group (target-type: ip).
+#   6. It writes the ALB's DNS name back into this object's
+#        status.loadBalancer.ingress
+#      which is what `kubectl get ingress` shows you in the ADDRESS column.
+#
+#   Total: about 2-3 minutes. An empty ADDRESS after 5 minutes means step 3 or
+#   4 failed — check `kubectl logs -n kube-system deploy/aws-load-balancer-controller`.
+#
+# THE RESULTING REQUEST PATH:
+#
+#   Internet
+#      -> AWS WAF          (Web ACL, attached by the annotation below)
+#      -> AWS ALB          (public subnets, 2 AZs)
+#      -> listener rule    (from the rules[] section below)
+#      -> target group     (pod IPs, port 8080)
+#      -> frontend pod / nginx
+#      -> [ /api/* only ] backend-service -> backend pod
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jollof-run-ingress
+  namespace: jollof-run
+  labels:
+    app.kubernetes.io/part-of: jollof-run
+
+  annotations:
+    # =========================================================================
+    # SCHEME AND TARGETS
+    # =========================================================================
+
+    # internet-facing = public IPs, placed in subnets tagged
+    #                   kubernetes.io/role/elb
+    # internal        = private IPs, in subnets tagged
+    #                   kubernetes.io/role/internal-elb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # -------------------------------------------------------------------------
+    # ip vs instance — worth being able to explain
+    #
+    #   ip        the ALB sends traffic DIRECTLY to pod IPs. One less hop, the
+    #             real client IP is preserved, works with Fargate. Requires the
+    #             VPC CNI (which we have).
+    #   instance  the ALB sends traffic to a NodePort on each node, and
+    #             kube-proxy forwards from there. Extra hop, and the source IP
+    #             gets rewritten.
+    # -------------------------------------------------------------------------
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # Group multiple Ingress objects onto ONE ALB. With one Ingress it changes
+    # nothing — but it means adding a second Ingress later reuses this ALB
+    # instead of provisioning another $16/month load balancer.
+    alb.ingress.kubernetes.io/group.name: jollof-run
+
+    # =========================================================================
+    # LISTENERS
+    # =========================================================================
+
+    # HTTP only. In production you would add 443, an ACM certificate, and an
+    # HTTP->HTTPS redirect:
+    #
+    #   alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    #   alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:...
+    #   alb.ingress.kubernetes.io/ssl-redirect: '443'
+    #
+    # That needs a domain name you control and a validated ACM certificate,
+    # which is out of scope here — the ALB's own DNS name cannot have a public
+    # certificate issued for it.
+    #
+    # BE HONEST ABOUT THIS IN AN INTERVIEW: HTTP-only means credentials and
+    # session data would traverse the internet in plaintext. This application
+    # has neither, so the exposure is real but bounded. It is a deliberate
+    # scope decision, not an oversight.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+
+    # =========================================================================
+    # AWS WAF  <-- PHASE 9
+    # =========================================================================
+    # THIS SINGLE LINE IS THE ENTIRE WAF ATTACHMENT.
+    #
+    # Why here and not in Terraform? Because Terraform does not create the ALB
+    # — the controller does — so at plan time there is no ALB ARN to associate
+    # a Web ACL with. Terraform creates the Web ACL and outputs its ARN; the
+    # controller does the association.
+    #
+    # Fill it in with:
+    #   cd terraform && terraform output -raw waf_web_acl_arn
+    #
+    # or run: ./scripts/render-manifests.sh   (see docs/runbook.md)
+    #
+    # LEAVE THIS COMMENTED OUT UNTIL PHASE 9. An invalid or placeholder ARN
+    # makes the controller fail to reconcile the whole Ingress, and you get no
+    # ALB at all rather than an ALB without WAF.
+    # -------------------------------------------------------------------------
+    # alb.ingress.kubernetes.io/wafv2-acl-arn: __WAF_ACL_ARN__
+
+    # =========================================================================
+    # OBSERVABILITY
+    # =========================================================================
+
+    # Tags applied to the ALB itself, so it shows up in cost allocation
+    # alongside the Terraform-managed resources.
+    alb.ingress.kubernetes.io/tags: Project=jollof-run,Environment=learning,ManagedBy=alb-controller
+
+    # Drain connections for 30s before deregistering a target, instead of the
+    # 300s default. Makes rolling updates finish in a reasonable time while
+    # still not cutting off in-flight requests.
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+
+    # ALB access logs to S3 — every request, with latency and status. Left off
+    # to keep this phase simple and to avoid another bucket; enable it if you
+    # want request-level forensics beyond what CloudWatch metrics give you:
+    #
+    #   alb.ingress.kubernetes.io/load-balancer-attributes: >-
+    #     access_logs.s3.enabled=true,access_logs.s3.bucket=my-alb-logs
+
+spec:
+  # The controller that owns this Ingress. Kubernetes supports multiple
+  # controllers in one cluster (nginx, traefik, ALB); this field decides which
+  # one acts. Omit it and NOTHING happens, silently — the classic "I applied
+  # the Ingress and nothing was created".
+  ingressClassName: alb
+
+  rules:
+    - http:
+        paths:
+          # -------------------------------------------------------------------
+          # ONE RULE. EVERYTHING GOES TO THE FRONTEND.
+          # -------------------------------------------------------------------
+          # There is deliberately NO "/api -> backend-service" path here.
+          #
+          # If there were, the ALB would route /api/* straight to the backend,
+          # the browser would call the API directly, and the backend would be
+          # published on the internet. That would contradict the requirement
+          # that the backend is internal only.
+          #
+          # Instead, /api/* reaches nginx like every other request, and nginx
+          # proxies it SERVER-SIDE to backend-service (frontend/nginx.conf).
+          #
+          #   Browser sees:  GET http://<alb-dns>/api/restaurants
+          #   nginx does:    GET http://backend-service:8000/restaurants
+          #
+          # The browser never learns the backend exists.
+          #
+          # NOTE FOR PHASE 9: WAF still inspects /api/* requests, because they
+          # pass through the ALB on their way to nginx. The SQL-injection test
+          # works exactly as expected.
+          #
+          # pathType: Prefix  "/" matches everything
+          #           Exact   matches only the literal path
+          #           ImplementationSpecific  the controller decides
+          # -------------------------------------------------------------------
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
