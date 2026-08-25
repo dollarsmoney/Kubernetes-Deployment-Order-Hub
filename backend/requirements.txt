@@ -2,7 +2,7 @@
 # differently every day", which makes a container image unreproducible and
 # makes "it worked last week" impossible to investigate.
 
-fastapi==0.115.6
+fastapi==0.141.1
 uvicorn[standard]==0.34.0
 
 # SQLAlchemy Core. We use it for its connection pooling and its bound-parameter
