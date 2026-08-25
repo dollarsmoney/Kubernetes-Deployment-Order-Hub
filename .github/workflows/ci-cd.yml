@@ -254,7 +254,7 @@ jobs:
       # is strictly worse than one that is red only when it matters. HIGH still
       # gets reported below.
       - name: Trivy filesystem (gate on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -267,7 +267,7 @@ jobs:
       # Covers Terraform and the Kubernetes manifests. Replaces a separate
       # tfsec/checkov step — Trivy absorbed tfsec upstream.
       - name: Trivy config (Terraform + Kubernetes)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
@@ -276,7 +276,7 @@ jobs:
 
       # --- Report: everything HIGH and above ---------------------------------
       - name: Trivy filesystem (SARIF)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -336,7 +336,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
       - name: Trivy image (gate on CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ matrix.name }}:${{ github.sha }}
           severity: CRITICAL
@@ -344,7 +344,7 @@ jobs:
           exit-code: '1'
 
       - name: Trivy image (SARIF)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ matrix.name }}:${{ github.sha }}
           severity: HIGH,CRITICAL
