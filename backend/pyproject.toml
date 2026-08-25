@@ -1,0 +1,83 @@
+# =============================================================================
+# pyproject.toml — ruff and pytest configuration
+# =============================================================================
+# Config lives in the repo, not in CI flags. That way `ruff check` on your
+# laptop and `ruff check` in the pipeline enforce exactly the same rules — the
+# alternative is a green local run and a red CI run over a flag nobody
+# remembered to mirror.
+# =============================================================================
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+exclude = [".venv", "__pycache__", ".pytest_cache"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes — unused imports, undefined names
+    "I",   # isort — import ordering
+    "B",   # flake8-bugbear — likely bugs, not just style
+    "C4",  # comprehension simplifications
+    "UP",  # pyupgrade — modern syntax for the target version
+    "S",   # flake8-bandit — SECURITY. See the note below.
+    "RUF", # ruff's own rules
+]
+
+ignore = [
+    "E501", # line length is enforced by the formatter, not the linter
+    "B008", # function call in an argument default — this is how FastAPI's
+            # Depends() and Query() are meant to be written
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately do things production code should not.
+"tests/*" = [
+    "S101", # assert — that is the entire point of a test
+    "S105", # "hardcoded password" — test fixtures use obvious fake values
+    "S106",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "db"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# =============================================================================
+# WHY THE "S" (bandit) RULES ARE ON
+# =============================================================================
+# This project's whole argument is that SQL injection is prevented by
+# parameterised queries, not by the WAF sitting in front of it. S608
+# ("hardcoded SQL expression") is the rule that catches somebody f-stringing a
+# value into a query — the exact mistake db.py is written to avoid.
+#
+# Leaving it enabled means that claim is enforced by a linter on every commit
+# rather than by a comment nobody re-reads.
+# =============================================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers --strict-config"
+
+# Put backend/ on sys.path so tests can `import db` and `import app`.
+#
+# Without this, pytest inserts tests/ on sys.path (because tests/ has no
+# __init__.py) and every import fails with ModuleNotFoundError: No module named
+# 'db' — a confusing first-run failure that looks like a broken test rather than
+# a path problem.
+pythonpath = ["."]
+
+# Fail on warnings that indicate real problems, so a deprecation does not sit
+# unnoticed for a year.
+filterwarnings = [
+    "error::DeprecationWarning:app.*",
+    "error::DeprecationWarning:db.*",
+]
+
+markers = [
+    "integration: needs a live PostgreSQL (provided by the CI service container)",
+]

@@ -1,0 +1,68 @@
+# =============================================================================
+# dependabot.yml — automated dependency updates
+# =============================================================================
+# Trivy tells you a dependency is vulnerable. Dependabot opens the PR that fixes
+# it. Running the scanner without the updater means a CI job that reports the
+# same finding every week and never resolves it.
+#
+# Everything lands as a pull request, so the full pipeline — lint, tests, Trivy —
+# runs before anything merges.
+# =============================================================================
+
+version: 2
+updates:
+  # --------------------------------------------------------------- Python
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, backend]
+    commit-message:
+      prefix: 'deps(backend)'
+    groups:
+      # One PR for routine patch bumps instead of six. Security updates are
+      # still raised individually and immediately.
+      backend-patch:
+        update-types: [patch]
+
+  # ----------------------------------------------------------------- Node
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, frontend]
+    commit-message:
+      prefix: 'deps(frontend)'
+    groups:
+      frontend-minor-patch:
+        update-types: [minor, patch]
+
+  # -------------------------------------------------------- GitHub Actions
+  # Actions are pinned by tag (@v4). Tags are mutable, so this is what keeps
+  # them pointing at maintained releases rather than drifting silently.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: 'deps(ci)'
+
+  # --------------------------------------------------------------- Docker
+  # Watches the FROM lines in both Dockerfiles for new base-image tags — which
+  # is usually where Trivy's CVEs actually come from.
+  - package-ecosystem: docker
+    directories:
+      - /frontend
+      - /backend
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]
+    commit-message:
+      prefix: 'deps(docker)'

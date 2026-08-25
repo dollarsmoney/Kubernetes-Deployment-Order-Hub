@@ -1,0 +1,16 @@
+# Development and CI dependencies. NOT installed into the container image —
+# backend/Dockerfile only ever reads requirements.txt, which is why the runtime
+# image carries no test framework and no linter.
+
+-r requirements.txt
+
+pytest==8.3.4
+pytest-cov==6.0.0
+
+# FastAPI's TestClient is a thin wrapper over httpx, and starlette does not
+# pull it in by default.
+httpx==0.28.1
+
+# Linter and formatter. Pinned exactly so a ruff release cannot turn a green
+# pipeline red overnight without a deliberate version bump.
+ruff==0.8.6

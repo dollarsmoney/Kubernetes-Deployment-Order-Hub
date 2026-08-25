@@ -1,0 +1,42 @@
+# =============================================================================
+# .trivyignore — suppressed findings
+# =============================================================================
+# EMPTY ON PURPOSE. Nothing is currently suppressed.
+#
+# ---------------------------------------------------------------------------
+# THE RULE FOR ADDING ANYTHING HERE
+# ---------------------------------------------------------------------------
+# An ignore file is where security debt goes to be forgotten. Every entry must
+# carry three things, or it does not go in:
+#
+#   1. WHY it is not exploitable HERE — not "it is only a HIGH", but a concrete
+#      reason this code path is unreachable or the impact does not apply.
+#   2. WHO decided, and when.
+#   3. An EXPIRY date. Trivy enforces it: past that date the finding comes back
+#      and breaks the build again, which forces a re-review instead of a
+#      permanent silent exception.
+#
+# Format:
+#   CVE-2024-12345 exp:2026-12-31
+#
+# Worked example of an acceptable entry:
+#
+#   # CVE-2025-0000 — glibc parser bug reachable only via setuid binaries.
+#   # Our containers run as UID 1000/101 with capabilities: drop ALL and a
+#   # read-only root filesystem, so there is no setuid path to reach it.
+#   # No fixed version published upstream as of review.
+#   # Reviewed: 2026-08-24. Re-check when Debian ships a patched glibc.
+#   CVE-2025-0000 exp:2026-11-24
+#
+# ---------------------------------------------------------------------------
+# WHAT DOES NOT BELONG HERE
+# ---------------------------------------------------------------------------
+#   - "the build is red and I need to merge"        -> fix it or revert
+#   - a CVE with an available fixed version         -> bump the dependency
+#   - anything without an expiry date               -> that is not a decision,
+#                                                      it is an abdication
+#
+# Note the pipeline already passes `--ignore-unfixed`, so findings with no
+# upstream fix do not gate the build in the first place. If something reaches
+# this file, a fix existed and was consciously deferred.
+# =============================================================================
