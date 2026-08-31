@@ -68,7 +68,7 @@ RUN npm run build
 # four temp paths, and chowning the cache directories. Using the image that is
 # already built for it is simply less to get wrong.
 # =============================================================================
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine AS runtime
 
 # Copy our server config over the default one.
 COPY nginx.conf /etc/nginx/conf.d/default.conf
