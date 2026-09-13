@@ -68,7 +68,11 @@ RUN npm run build
 # four temp paths, and chowning the cache directories. Using the image that is
 # already built for it is simply less to get wrong.
 # =============================================================================
-FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+# 1.29, not 1.27: the 1.27-alpine image is built on an Alpine release carrying
+# openssl 3.3.3-r0, which has a CRITICAL (CVE-2026-31789) fixed in 3.3.7-r0.
+# 1.29-alpine ships a current openssl and scans clean. Only the base moves —
+# nginx config syntax is unchanged, and this stage just copies config in.
+FROM nginxinc/nginx-unprivileged:1.29-alpine AS runtime
 
 # Copy our server config over the default one.
 COPY nginx.conf /etc/nginx/conf.d/default.conf
