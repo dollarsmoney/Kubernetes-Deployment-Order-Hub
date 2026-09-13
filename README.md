@@ -115,15 +115,41 @@ and every one of them is a file you can open:
                     │   build-scan    │  docker build · trivy image
                     │   → SARIF       │  → GitHub Security tab
                     └────────┬────────┘
-                             ▼        main only · id-token: write
+                             ▼        main only · id-token + packages: write
                     ┌─────────────────┐
-                    │      push       │  OIDC → ECR
-                    └────────┬────────┘  :$GITHUB_SHA + :latest
+                    │      push       │  OIDC → ECR · GITHUB_TOKEN → GHCR
+                    └────────┬────────┘  :$GITHUB_SHA + :latest, one build
                              ▼        main only · id-token: write
                     ┌─────────────────┐
                     │     deploy      │  OIDC → EKS
-                    └─────────────────┘  set image · rollout status · auto-undo
+                    └────────┬────────┘  set image · rollout status · auto-undo
+                             ▼        always() · failures + main deploys
+                    ┌─────────────────┐
+                    │     notify      │  → Slack incoming webhook
+                    └─────────────────┘  names the stage that broke
 ```
+
+### Registries
+
+EKS pulls from **ECR**. The same build is published to **GHCR** in the same
+step, so both registries hold the identical digest — the image you can pull
+from `ghcr.io` is byte-for-byte the one Trivy scanned and the cluster runs.
+
+```
+ghcr.io/dollarsmoney/kubernetes-deployment-order-hub/backend:<sha>
+ghcr.io/dollarsmoney/kubernetes-deployment-order-hub/frontend:<sha>
+```
+
+GHCR needs no stored credential: `packages: write` on that one job lets it use
+the `GITHUB_TOKEN` that GitHub mints for the run and discards afterwards.
+
+### Repository secrets
+
+| Secret | Used by | Notes |
+|---|---|---|
+| `SLACK_WEBHOOK_URL` | `notify` | Incoming webhook. The only stored secret in the repo; it can post to one channel and nothing else. The job no-ops with a notice if it is unset, so fork PRs stay green. |
+
+There is no AWS access key and no registry PAT — both are OIDC or per-run tokens.
 
 ### The OIDC exchange — no stored credentials
 
