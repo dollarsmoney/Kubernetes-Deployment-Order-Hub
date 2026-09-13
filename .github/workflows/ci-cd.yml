@@ -1,5 +1,5 @@
 # =============================================================================
-# ci-cd.yml — static analysis → tests → Trivy → ECR → EKS
+# ci-cd.yml — static analysis → tests → Trivy → ECR + GHCR → EKS → Slack
 # =============================================================================
 #
 #   pull_request                push to main
@@ -11,9 +11,11 @@
 #                         v
 #                   [build-scan]        docker build, Trivy image scan
 #                         v
-#                      [push]           main only — OIDC -> ECR
+#                      [push]           main only — OIDC -> ECR, token -> GHCR
 #                         v
 #                     [deploy]          main only — OIDC -> EKS
+#                         v
+#                     [notify]          Slack: any failure, + every main deploy
 #
 # ONE workflow, not two. If CI and CD were separate workflows both triggered by
 # `push: main`, they would run in PARALLEL and CD could publish an image whose
@@ -37,8 +39,9 @@
 #   `repo:<owner>/<repo>:ref:refs/heads/main` — so even a leaked token from
 #   another branch is refused by STS. See terraform/github-oidc.tf.
 #
-# There is NO aws-access-key secret in this repository. There is nothing to
-# rotate and nothing to leak.
+# There is NO aws-access-key secret in this repository, and GHCR uses the
+# per-run GITHUB_TOKEN rather than a PAT. The single stored secret is
+# SLACK_WEBHOOK_URL, which can post a message to one channel and nothing more.
 # =============================================================================
 
 name: CI/CD
@@ -66,6 +69,9 @@ env:
   CLUSTER_NAME: jollof-run
   NAMESPACE: jollof-run
   ECR_REGISTRY: 609898225411.dkr.ecr.us-east-1.amazonaws.com
+  # GHCR paths must be lowercase, and this repository's name is mixed-case, so
+  # it is written out rather than derived from ${{ github.repository }}.
+  GHCR_IMAGE_BASE: ghcr.io/dollarsmoney/kubernetes-deployment-order-hub
   # An ARN is an identifier, not a credential. Committing it is fine — the
   # trust policy is what decides who may assume it.
   AWS_ROLE: arn:aws:iam::609898225411:role/jollof-run-github-actions
@@ -362,16 +368,17 @@ jobs:
           category: trivy-image-${{ matrix.name }}
 
   # ===========================================================================
-  # 6. PUSH TO ECR  — main only, first job that touches AWS
+  # 6. PUSH TO ECR + GHCR  — main only, first job that touches AWS
   # ===========================================================================
   push:
-    name: Push to ECR
+    name: Push to ECR + GHCR
     runs-on: ubuntu-latest
     needs: [build-scan]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
       id-token: write # THE OIDC PERMISSION. Only this job and `deploy` get it.
+      packages: write # GHCR, via the built-in GITHUB_TOKEN. No job above has it.
     strategy:
       fail-fast: false
       matrix:
@@ -402,22 +409,38 @@ jobs:
       - name: Log in to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Log in to GHCR
+        # No new secret to manage: GITHUB_TOKEN is minted for this run and dies
+        # with it. `packages: write` above is what makes it able to publish.
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           platforms: linux/amd64
           push: true
-          # TWO tags, and the SHA is the one that matters.
+          # FOUR tags across TWO registries, and the SHA is the one that matters.
           #
           # :latest is a moving target — you cannot tell which build is running,
           # and `kubectl rollout undo` has nothing meaningful to roll back to.
           # The deploy job below pins the SHA, which finally makes the
           # deployments immutable. :latest is kept only for convenience when
           # pulling by hand.
+          #
+          # ECR is what EKS pulls from. GHCR is a public mirror so the images are
+          # visible from the repository itself. One build feeds both, so the two
+          # registries hold the IDENTICAL DIGEST — there is no second build that
+          # could drift from the artifact Trivy actually scanned.
           tags: |
             ${{ env.ECR_REGISTRY }}/jollof-run/${{ matrix.name }}:${{ github.sha }}
             ${{ env.ECR_REGISTRY }}/jollof-run/${{ matrix.name }}:latest
+            ${{ env.GHCR_IMAGE_BASE }}/${{ matrix.name }}:${{ github.sha }}
+            ${{ env.GHCR_IMAGE_BASE }}/${{ matrix.name }}:latest
           cache-from: type=gha,scope=${{ matrix.name }}
 
   # ===========================================================================
@@ -493,3 +516,150 @@ jobs:
             kubectl -n "$NAMESPACE" get deploy,pods -o wide 2>&1 || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # 8. SLACK — one message per run
+  # ===========================================================================
+  #
+  # A single terminal job rather than a notification step bolted onto all seven
+  # others. That buys two things: exactly ONE message per run instead of a burst
+  # of seven, and access to `needs.*.result`, so the alert can name WHICH stage
+  # broke instead of only reporting that something did.
+  notify:
+    name: Slack notification
+    runs-on: ubuntu-latest
+    needs: [lint, test-backend, test-frontend, scan-source, build-scan, push, deploy]
+
+    # Deliberately quiet. It fires when something failed, or on any main-branch
+    # push so a production deploy is always confirmed either way. A green PR
+    # sends nothing — a channel that pings on every success gets muted, and a
+    # muted channel is the same as no alerting at all.
+    #
+    # always() is load-bearing: without it this job is skipped the moment a
+    # dependency fails, which is precisely the case it exists to report.
+    if: >-
+      always() && (
+        contains(needs.*.result, 'failure') ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      )
+
+    steps:
+      - name: Post to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+          # UNTRUSTED INPUT. A commit subject is attacker-controlled on a fork
+          # PR and can contain backticks, quotes and $(...). Interpolating
+          # ${{ ... }} straight into a run block pastes it into the script
+          # BEFORE bash sees it, which is remote code execution on the runner.
+          # Passing it through the environment and then `jq --arg` means bash
+          # never parses it and jq does the JSON escaping.
+          COMMIT_MSG: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+
+          R_LINT: ${{ needs.lint.result }}
+          R_TEST_BACKEND: ${{ needs.test-backend.result }}
+          R_TEST_FRONTEND: ${{ needs.test-frontend.result }}
+          R_SCAN_SOURCE: ${{ needs.scan-source.result }}
+          R_BUILD_SCAN: ${{ needs.build-scan.result }}
+          R_PUSH: ${{ needs.push.result }}
+          R_DEPLOY: ${{ needs.deploy.result }}
+        run: |
+          # No `set -e`: a notification must never be the thing that fails a
+          # build. Every failure path below is handled explicitly instead.
+          set -uo pipefail
+
+          # Fork PRs are not given secrets, and the webhook may not be
+          # configured yet. Neither is an error — say so and leave green.
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::notice::SLACK_WEBHOOK_URL is not set — skipping the Slack notification."
+            exit 0
+          fi
+
+          # --- Which stages failed? ---------------------------------------------
+          # 'skipped' is not a failure: `push` and `deploy` are skipped by design
+          # on every pull request.
+          failed=""
+          check() {
+            if [ "$2" = "failure" ]; then
+              failed="${failed:+$failed, }$1"
+            fi
+          }
+          check "Static analysis"        "$R_LINT"
+          check "Backend tests"          "$R_TEST_BACKEND"
+          check "Frontend tests"         "$R_TEST_FRONTEND"
+          check "Trivy (source + IaC)"   "$R_SCAN_SOURCE"
+          check "Build & scan images"    "$R_BUILD_SCAN"
+          check "Push to ECR + GHCR"     "$R_PUSH"
+          check "Deploy to EKS"          "$R_DEPLOY"
+
+          if [ -n "$failed" ]; then
+            header=":x: *CI/CD failed*"
+            color="#d10c20"
+          else
+            header=":white_check_mark: *CI/CD passed*"
+            color="#2eb886"
+          fi
+
+          # First line only, capped at 120 chars, with & < > escaped the way
+          # Slack specifies. Escaping rather than deleting means a crafted
+          # subject cannot forge a <url|link> in the message, while a legitimate
+          # `a > b` still renders as written.
+          subject="$(printf '%s' "$COMMIT_MSG" \
+            | head -n 1 \
+            | cut -c1-120 \
+            | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+
+          body="*Repo:* ${GITHUB_REPOSITORY}
+          *Branch:* \`${GITHUB_REF_NAME}\`   *Event:* \`${GITHUB_EVENT_NAME}\`
+          *Commit:* <${COMMIT_URL}|\`${GITHUB_SHA:0:7}\`> by \`${GITHUB_ACTOR}\`
+          *Subject:* ${subject}"
+
+          case "$R_DEPLOY" in
+            success)
+              body="${body}
+          :rocket: Rolled out to EKS — cluster \`${CLUSTER_NAME}\`, namespace \`${NAMESPACE}\`."
+              ;;
+            failure)
+              body="${body}
+          :rotating_light: Rollout FAILED — both deployments were rolled back."
+              ;;
+          esac
+
+          if [ -n "$failed" ]; then
+            body="${body}
+          *Failed stages:* ${failed}"
+          fi
+
+          # jq -n --arg builds the JSON; no shell string ever becomes JSON
+          # syntax by hand. `attachments[].color` is what draws the red or
+          # green bar down the left of the message.
+          payload="$(jq -n \
+            --arg color "$color" \
+            --arg header "$header" \
+            --arg body "$body" \
+            --arg run_url "$RUN_URL" \
+            --arg run_label "View run #${GITHUB_RUN_NUMBER}" \
+            '{
+              attachments: [{
+                color: $color,
+                blocks: [
+                  { type: "section", text: { type: "mrkdwn", text: $header } },
+                  { type: "section", text: { type: "mrkdwn", text: $body } },
+                  { type: "actions", elements: [
+                      { type: "button",
+                        text: { type: "plain_text", text: $run_label },
+                        url: $run_url }
+                  ] }
+                ]
+              }]
+            }')"
+
+          # Slack being unreachable must not turn a good deploy red.
+          if ! curl -sS --fail --max-time 20 \
+                 -X POST -H 'Content-type: application/json' \
+                 --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null; then
+            echo "::warning::Slack notification could not be delivered. The pipeline result itself is unaffected."
+          fi
