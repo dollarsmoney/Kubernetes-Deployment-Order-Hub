@@ -1,5 +1,5 @@
 # =============================================================================
-# ci-cd.yml — static analysis → tests → Trivy → ECR + GHCR → EKS → Slack
+# ci-cd.yml — static analysis → tests → Trivy → GHCR → EKS → Slack
 # =============================================================================
 #
 #   pull_request                push to main
@@ -11,7 +11,7 @@
 #                         v
 #                   [build-scan]        docker build, Trivy image scan
 #                         v
-#                      [push]           main only — OIDC -> ECR, token -> GHCR
+#                      [push]           main only — GITHUB_TOKEN -> GHCR
 #                         v
 #                     [deploy]          main only — OIDC -> EKS
 #                         v
@@ -27,11 +27,12 @@
 # Anyone can fork a public repo and open a pull request. Two independent guards
 # stop a fork PR from reaching AWS:
 #
-#   1. `permissions` are declared PER JOB, not workflow-wide. Only `push` and
-#      `deploy` request `id-token: write`. Everything else runs with a
-#      read-only token and no ability to request an OIDC assertion at all.
+#   1. `permissions` are declared PER JOB, not workflow-wide. Only `deploy`
+#      requests `id-token: write`, and only `push` requests `packages: write`.
+#      Everything else runs with a read-only token and no ability to request an
+#      OIDC assertion at all.
 #
-#   2. Those two jobs are gated on
+#   2. Both of those jobs are gated on
 #      `github.event_name == 'push' && github.ref == 'refs/heads/main'`,
 #      which a pull_request event can never satisfy.
 #
@@ -68,7 +69,9 @@ env:
   AWS_REGION: us-east-1
   CLUSTER_NAME: jollof-run
   NAMESPACE: jollof-run
-  ECR_REGISTRY: 609898225411.dkr.ecr.us-east-1.amazonaws.com
+  # The one registry. Both packages are PUBLIC, which is what lets the EKS
+  # nodes pull anonymously — no imagePullSecret, no PAT in the cluster.
+  #
   # GHCR paths must be lowercase, and this repository's name is mixed-case, so
   # it is written out rather than derived from ${{ github.repository }}.
   GHCR_IMAGE_BASE: ghcr.io/dollarsmoney/kubernetes-deployment-order-hub
@@ -368,16 +371,19 @@ jobs:
           category: trivy-image-${{ matrix.name }}
 
   # ===========================================================================
-  # 6. PUSH TO ECR + GHCR  — main only, first job that touches AWS
+  # 6. PUSH TO GHCR — main only
   # ===========================================================================
+  #
+  # This job touches no AWS at all, which is why it does NOT request
+  # `id-token: write`. `deploy` is now the only job in the workflow that can
+  # obtain an OIDC assertion — a strictly smaller blast radius than before.
   push:
-    name: Push to ECR + GHCR
+    name: Push to GHCR
     runs-on: ubuntu-latest
     needs: [build-scan]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
-      id-token: write # THE OIDC PERMISSION. Only this job and `deploy` get it.
       packages: write # GHCR, via the built-in GITHUB_TOKEN. No job above has it.
     strategy:
       fail-fast: false
@@ -392,26 +398,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # No secrets. The action requests a JWT from GitHub, hands it to STS, and
-      # receives ~1h credentials. Verify in the logs: it prints the assumed role.
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: gha-push-${{ github.run_id }}
-
-      - name: Who am I?
-        # Cheap, and it is the proof the OIDC exchange worked. Should report an
-        # assumed-role ARN, never a user.
-        run: aws sts get-caller-identity
-
-      - name: Log in to ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
       - name: Log in to GHCR
-        # No new secret to manage: GITHUB_TOKEN is minted for this run and dies
-        # with it. `packages: write` above is what makes it able to publish.
+        # No stored credential and no PAT: GITHUB_TOKEN is minted for this run
+        # and dies with it. `packages: write` above is what lets it publish.
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -424,21 +413,14 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/amd64
           push: true
-          # FOUR tags across TWO registries, and the SHA is the one that matters.
+          # TWO tags, and the SHA is the one that matters.
           #
           # :latest is a moving target — you cannot tell which build is running,
           # and `kubectl rollout undo` has nothing meaningful to roll back to.
           # The deploy job below pins the SHA, which finally makes the
           # deployments immutable. :latest is kept only for convenience when
           # pulling by hand.
-          #
-          # ECR is what EKS pulls from. GHCR is a public mirror so the images are
-          # visible from the repository itself. One build feeds both, so the two
-          # registries hold the IDENTICAL DIGEST — there is no second build that
-          # could drift from the artifact Trivy actually scanned.
           tags: |
-            ${{ env.ECR_REGISTRY }}/jollof-run/${{ matrix.name }}:${{ github.sha }}
-            ${{ env.ECR_REGISTRY }}/jollof-run/${{ matrix.name }}:latest
             ${{ env.GHCR_IMAGE_BASE }}/${{ matrix.name }}:${{ github.sha }}
             ${{ env.GHCR_IMAGE_BASE }}/${{ matrix.name }}:latest
           cache-from: type=gha,scope=${{ matrix.name }}
@@ -484,11 +466,13 @@ jobs:
           echo "Correctly denied."
 
       - name: Roll out the new images
+        # Pinned to the SHA, never :latest — this is what makes a rollout
+        # reproducible and `rollout undo` meaningful.
         run: |
           kubectl -n "$NAMESPACE" set image deployment/frontend \
-            frontend="$ECR_REGISTRY/jollof-run/frontend:$GITHUB_SHA"
+            frontend="$GHCR_IMAGE_BASE/frontend:$GITHUB_SHA"
           kubectl -n "$NAMESPACE" set image deployment/backend \
-            backend="$ECR_REGISTRY/jollof-run/backend:$GITHUB_SHA"
+            backend="$GHCR_IMAGE_BASE/backend:$GITHUB_SHA"
 
       - name: Wait for the rollout
         # The step that makes this a real deploy rather than a fire-and-forget.
@@ -592,7 +576,7 @@ jobs:
           check "Frontend tests"         "$R_TEST_FRONTEND"
           check "Trivy (source + IaC)"   "$R_SCAN_SOURCE"
           check "Build & scan images"    "$R_BUILD_SCAN"
-          check "Push to ECR + GHCR"     "$R_PUSH"
+          check "Push to GHCR"           "$R_PUSH"
           check "Deploy to EKS"          "$R_DEPLOY"
 
           if [ -n "$failed" ]; then

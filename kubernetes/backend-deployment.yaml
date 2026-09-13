@@ -42,7 +42,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: backend
-          image: 609898225411.dkr.ecr.us-east-1.amazonaws.com/jollof-run/backend:latest
+          image: ghcr.io/dollarsmoney/kubernetes-deployment-order-hub/backend:latest
           imagePullPolicy: Always
           ports:
             - name: http
