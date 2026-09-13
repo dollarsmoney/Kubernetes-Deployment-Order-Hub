@@ -8,6 +8,19 @@
 # Usage:  ./scripts/verify.sh
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# SC2015 — "note that A && B || C is not if-then-else".
+#
+# The checks below are all written as `[[ cond ]] && ok "..." || bad "..."`.
+# That idiom is only a trap when B can fail, because then C runs too. Here it
+# cannot: ok() and bad() each END in a plain assignment (`PASS=$((PASS+1))`),
+# and an assignment always exits 0. So the || branch can never fire after a
+# successful && branch.
+#
+# Disabled file-wide rather than eleven times inline. If you ever add a helper
+# that can return non-zero, drop this and use if/else for that call.
+# shellcheck disable=SC2015
+# -----------------------------------------------------------------------------
 set -uo pipefail
 
 REGION="${AWS_REGION:-us-east-1}"

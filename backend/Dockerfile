@@ -9,7 +9,7 @@
 # Run:    docker run -p 8000:8000 -e DATABASE_URL=... jollof-backend:local
 # =============================================================================
 
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 # -----------------------------------------------------------------------------
 # Why -slim and not :latest or :alpine
@@ -25,6 +25,23 @@ FROM python:3.12-slim
 #
 # `latest` is never pinned. A rebuild six months from now would silently pull
 # a different Python.
+#
+# -----------------------------------------------------------------------------
+# WHY THE EXPLICIT -bookworm SUFFIX
+# -----------------------------------------------------------------------------
+# Bare `python:3.12-slim` follows whatever Debian release upstream currently
+# considers default, which moved to trixie (13). That image ships perl-base
+# 5.40.1-6, which carries a CRITICAL with a fix already published
+# (5.40.1-6+deb13u1) that the published image has not been rebuilt against
+# yet — so the Trivy image gate fails on a CVE we cannot fix from here.
+#
+# Pinning the codename keeps Python at 3.12 and puts the OS on Debian 12,
+# which scans clean today. It also stops the base OS from changing underneath
+# a rebuild, which the paragraph above already argues for on the Python side.
+#
+# If the trixie image is rebuilt with the fix, dropping the suffix again is a
+# one-word change. The alternative — `apt-get upgrade` at build time — was not
+# taken: it makes builds non-reproducible and trips hadolint DL3005.
 # -----------------------------------------------------------------------------
 
 # PYTHONDONTWRITEBYTECODE  no .pyc files — pointless in an immutable container
