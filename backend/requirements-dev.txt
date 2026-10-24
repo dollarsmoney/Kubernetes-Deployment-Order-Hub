@@ -5,7 +5,7 @@
 -r requirements.txt
 
 pytest==8.3.4
-pytest-cov==6.0.0
+pytest-cov==7.1.0
 
 # FastAPI's TestClient is a thin wrapper over httpx, and starlette does not
 # pull it in by default.
