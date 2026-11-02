@@ -115,10 +115,10 @@ and every one of them is a file you can open:
                     │   build-scan    │  docker build · trivy image
                     │   → SARIF       │  → GitHub Security tab
                     └────────┬────────┘
-                             ▼        main only · id-token + packages: write
+                             ▼        main only · packages: write
                     ┌─────────────────┐
-                    │      push       │  OIDC → ECR · GITHUB_TOKEN → GHCR
-                    └────────┬────────┘  :$GITHUB_SHA + :latest, one build
+                    │      push       │  GITHUB_TOKEN → GHCR
+                    └────────┬────────┘  :$GITHUB_SHA + :latest
                              ▼        main only · id-token: write
                     ┌─────────────────┐
                     │     deploy      │  OIDC → EKS
@@ -129,19 +129,31 @@ and every one of them is a file you can open:
                     └─────────────────┘  names the stage that broke
 ```
 
-### Registries
+### Registry
 
-EKS pulls from **ECR**. The same build is published to **GHCR** in the same
-step, so both registries hold the identical digest — the image you can pull
-from `ghcr.io` is byte-for-byte the one Trivy scanned and the cluster runs.
+One registry, **GHCR**, and it is what EKS pulls from:
 
 ```
 ghcr.io/dollarsmoney/kubernetes-deployment-order-hub/backend:<sha>
 ghcr.io/dollarsmoney/kubernetes-deployment-order-hub/frontend:<sha>
 ```
 
-GHCR needs no stored credential: `packages: write` on that one job lets it use
-the `GITHUB_TOKEN` that GitHub mints for the run and discards afterwards.
+Both packages are **public**, which is load-bearing: it is what lets the nodes
+pull anonymously, so there is no `imagePullSecret` and no registry PAT living
+in the cluster. Making them private would require exactly that — a long-lived
+credential to store and rotate — which is the thing this project is built to
+avoid.
+
+Publishing needs no stored credential either: `packages: write` on that one job
+lets it use the `GITHUB_TOKEN` GitHub mints for the run and discards after.
+Because it touches no AWS, the `push` job does not request `id-token: write` at
+all — `deploy` is the only job in the workflow that can obtain an OIDC
+assertion.
+
+> The ECR repositories in `terraform/ecr.tf` still exist but no longer receive
+> pushes. They are left in place deliberately so the switch is reversible;
+> removing them is a separate change, and `terraform apply` after deleting that
+> file would destroy the registries and every image in them.
 
 ### Repository secrets
 
@@ -166,14 +178,14 @@ IAM trust policy checks BOTH claims:
                                                               ^^^^^^^^^^^^^^^^^^
       not `:*` — a fork, a PR, or any other branch is refused by STS
       ▼
-~1 hour of temporary credentials, scoped to two ECR repos and one namespace
+~1 hour of temporary credentials, scoped to one namespace on one cluster
 ```
 
 **This repository is public**, so fork PRs are a real threat model. Three
 independent guards, any one of which would be sufficient:
 
-1. `permissions` are declared **per job** — only `push` and `deploy` ever
-   request `id-token: write`
+1. `permissions` are declared **per job** — only `deploy` ever requests
+   `id-token: write`, and only `push` ever requests `packages: write`
 2. Both are gated on `github.event_name == 'push' && github.ref == 'refs/heads/main'`,
    which a `pull_request` event cannot satisfy
 3. The IAM trust policy pins the branch ref, so a leaked token from anywhere

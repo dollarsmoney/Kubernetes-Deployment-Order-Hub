@@ -1,7 +1,8 @@
 # =============================================================================
 # .trivyignore — suppressed findings
 # =============================================================================
-# EMPTY ON PURPOSE. Nothing is currently suppressed.
+# Two entries, both at the bottom of this file. Read the rule before adding a
+# third.
 #
 # ---------------------------------------------------------------------------
 # THE RULE FOR ADDING ANYTHING HERE
@@ -40,3 +41,38 @@
 # upstream fix do not gate the build in the first place. If something reaches
 # this file, a fix existed and was consciously deferred.
 # =============================================================================
+
+# -----------------------------------------------------------------------------
+# EKS public API endpoint — terraform/eks.tf:64 and :79
+# -----------------------------------------------------------------------------
+# These two are the SAME decision, already argued in eks.tf:67-78. They did not
+# appear before because the pipeline ran Trivy 0.28, which did not carry these
+# checks; Trivy 0.70 does. The configuration did not change — the scanner did.
+#
+# WHY it is accepted here:
+#   The endpoint is public but NOT unauthenticated. Reaching it still requires
+#   a valid IAM principal mapped to an EKS access entry, over TLS. What is
+#   exposed is the ability to attempt authentication, not the cluster.
+#
+#   It also cannot simply be turned off. The `deploy` job runs on
+#   GitHub-hosted runners, which reach the API server over the internet. With
+#   endpoint_public_access = false, CD stops working entirely unless a
+#   self-hosted runner is placed inside the VPC. Narrowing public_access_cidrs
+#   is the better fix, but GitHub's runner ranges are hundreds of rotating
+#   CIDRs against an EKS limit of 40, so that is not a drop-in change either.
+#
+#   Compensating controls already in place: IAM + OIDC authentication, the CD
+#   role scoped to one namespace (asserted on every run by the "Confirm
+#   least-privilege scoping" step), and control-plane audit logging to
+#   CloudWatch — so an attempt against this endpoint is recorded.
+#
+# WHO/WHEN: dollarsmoney, 2026-09-13.
+#
+# WHAT WOULD RETIRE THESE: a self-hosted runner in the VPC, or a stable egress
+# IP (NAT/VPN) to put in public_access_cidrs. Either makes both entries
+# unnecessary — delete them, do not extend them.
+#
+# The expiry is the point: in six months this comes back and breaks the build
+# again, forcing this argument to be made once more rather than inherited.
+AWS-0040 exp:2027-03-13
+AWS-0041 exp:2027-03-13
