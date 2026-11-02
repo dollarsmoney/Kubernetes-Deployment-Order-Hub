@@ -9,7 +9,7 @@
 # Run:    docker run -p 8000:8000 -e DATABASE_URL=... jollof-backend:local
 # =============================================================================
 
-FROM python:3.12-slim-bookworm
+FROM python:3.15-slim-bookworm
 
 # -----------------------------------------------------------------------------
 # Why -slim and not :latest or :alpine
