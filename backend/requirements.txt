@@ -11,7 +11,7 @@ SQLAlchemy==2.0.36
 
 # PostgreSQL driver. The -binary wheel bundles libpq so the image needs no
 # build toolchain and no libpq-dev. Smaller image, faster build.
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.13
 
 # Only used by the ALTERNATIVE credential path in db.py (direct Secrets Manager
 # fetch). The primary path reads the file the CSI driver mounts and needs no
